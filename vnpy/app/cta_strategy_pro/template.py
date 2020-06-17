@@ -193,7 +193,7 @@ class CtaTemplate(ABC):
         """
         Send buy order to open a long position.
         """
-        if OrderType in [OrderType.FAK, OrderType.FOK]:
+        if order_type in [OrderType.FAK, OrderType.FOK]:
             if self.is_upper_limit(vt_symbol):
                 self.write_error(u'涨停价不做FAK/FOK委托')
                 return []
@@ -214,7 +214,7 @@ class CtaTemplate(ABC):
         """
         Send sell order to close a long position.
         """
-        if OrderType in [OrderType.FAK, OrderType.FOK]:
+        if order_type in [OrderType.FAK, OrderType.FOK]:
             if self.is_lower_limit(vt_symbol):
                 self.write_error(u'跌停价不做FAK/FOK sell委托')
                 return []
@@ -235,7 +235,7 @@ class CtaTemplate(ABC):
         """
         Send short order to open as short position.
         """
-        if OrderType in [OrderType.FAK, OrderType.FOK]:
+        if order_type in [OrderType.FAK, OrderType.FOK]:
             if self.is_lower_limit(vt_symbol):
                 self.write_error(u'跌停价不做FAK/FOK short委托')
                 return []
@@ -256,7 +256,7 @@ class CtaTemplate(ABC):
         """
         Send cover order to close a short position.
         """
-        if OrderType in [OrderType.FAK, OrderType.FOK]:
+        if order_type in [OrderType.FAK, OrderType.FOK]:
             if self.is_upper_limit(vt_symbol):
                 self.write_error(u'涨停价不做FAK/FOK cover委托')
                 return []
@@ -628,12 +628,13 @@ class CtaProTemplate(CtaTemplate):
         if self.idx_symbol is None:
             symbol, exchange = extract_vt_symbol(self.vt_symbol)
             self.idx_symbol = get_underlying_symbol(symbol).upper() + '99.' + exchange.value
+        self.cta_engine.subscribe_symbol(strategy_name=self.strategy_name, vt_symbol=self.idx_symbol)
+
         if self.vt_symbol != self.idx_symbol:
             self.write_log(f'指数合约:{self.idx_symbol}, 主力合约:{self.vt_symbol}')
         self.price_tick = self.cta_engine.get_price_tick(self.vt_symbol)
         self.symbol_size = self.cta_engine.get_size(self.vt_symbol)
         self.margin_rate = self.cta_engine.get_margin_rate(self.vt_symbol)
-
 
     def sync_data(self):
         """同步更新数据"""
@@ -848,6 +849,7 @@ class CtaProTemplate(CtaTemplate):
 
         for vt_orderid in list(self.active_orders.keys()):
             order_info = self.active_orders.get(vt_orderid)
+            order_grid = order_info.get('grid',None)
             if order_info.get('status', None) in [Status.CANCELLED, Status.REJECTED]:
                 self.active_orders.pop(vt_orderid, None)
                 continue
@@ -862,6 +864,11 @@ class CtaProTemplate(CtaTemplate):
                     order_info.update({'status': Status.CANCELLING})
                 else:
                     order_info.update({'status': Status.CANCELLED})
+                    if order_grid:
+                        if vt_orderid in order_grid.order_ids:
+                            order_grid.order_ids.remove(vt_orderid)
+                        if len(order_grid.order_ids) == 0:
+                            order_grid.order_status = False
 
         if len(self.active_orders) < 1:
             self.entrust = 0
@@ -1109,7 +1116,6 @@ class CtaProFutureTemplate(CtaProTemplate):
         self.trading = True
         self.put_event()
 
-    # ----------------------------------------------------------------------
     def on_stop(self):
         """停止策略（必须由用户继承实现）"""
         self.active_orders.clear()
@@ -1287,7 +1293,6 @@ class CtaProFutureTemplate(CtaProTemplate):
         old_order['traded'] = order.traded
         order_vt_symbol = copy(old_order['vt_symbol'])
         order_volume = old_order['volume'] - old_order['traded']
-
 
         order_price = old_order['price']
         order_type = old_order.get('order_type', OrderType.LIMIT)
@@ -1469,7 +1474,6 @@ class CtaProFutureTemplate(CtaProTemplate):
             self.active_orders.pop(order.vt_orderid, None)
             return
 
-
         if order_retry > 20:
             msg = u'{} 平仓撤单 {}/{}手， 重试平仓次数{}>20' \
                 .format(self.strategy_name, order_vt_symbol, order_volume, order_retry)
@@ -1506,6 +1510,14 @@ class CtaProFutureTemplate(CtaProTemplate):
 
             if self.is_upper_limit(order_vt_symbol):
                 self.write_log(u'{}涨停，不做cover'.format(order_vt_symbol))
+                return
+
+            pos = self.cta_engine.get_position_holding(vt_symbol=order_vt_symbol)
+            if pos is None:
+                self.write_error(f'{self.strategy_name}无法获取{order_vt_symbol}的持仓信息，无法平仓')
+                return
+            if pos.short_pos < order_volume:
+                self.write_error(f'{self.strategy_name}{order_vt_symbol}的持仓空单{pos.short_pos}不满足平仓{order_volume}要求，无法平仓')
                 return
 
             # 发送委托
@@ -1547,6 +1559,13 @@ class CtaProFutureTemplate(CtaProTemplate):
                 self.write_log(u'{}涨停，不做sell'.format(order_vt_symbol))
                 return
 
+            pos = self.cta_engine.get_position_holding(vt_symbol=order_vt_symbol)
+            if pos is None:
+                self.write_error(f'{self.strategy_name}无法获取{order_vt_symbol}的持仓信息，无法平仓')
+                return
+            if pos.long_pos < order_volume:
+                self.write_error(f'{self.strategy_name}{order_vt_symbol}的持仓多单{pos.long_pos}不满足平仓{order_volume}要求，无法平仓')
+                return
             # 发送委托
             vt_orderids = self.sell(price=sell_price,
                                     volume=order_volume,

@@ -15,11 +15,12 @@ import os
 import pickle
 import bz2
 import traceback
+import pandas as pd
+
 from datetime import datetime, timedelta
 from logging import ERROR
 from pytdx.hq import TdxHq_API
 from pytdx.params import TDXParams
-from pandas import to_datetime
 
 from vnpy.trader.object import BarData
 from vnpy.trader.constant import Exchange
@@ -74,7 +75,6 @@ class TdxStockData(object):
 
         self.strategy = strategy
         self.best_ip = None
-        self.symbol_exchange_dict = {}  # tdx合约与vn交易所的字典
         self.symbol_market_dict = {}  # tdx合约与tdx市场的字典
 
         self.config = get_cache_config(TDX_STOCK_CONFIG)
@@ -120,7 +120,14 @@ class TdxStockData(object):
                     self.config.update({'best_ip': self.best_ip})
                     save_cache_config(self.config, TDX_STOCK_CONFIG)
 
-                self.api.connect(self.best_ip.get('ip'), self.best_ip.get('port'))
+                # 如果配置proxy5，使用vnpy项目下的pytdx
+                if len(self.proxy_ip) > 0 and self.proxy_port > 0:
+                    self.api.connect(ip=self.best_ip['ip'], port=self.best_ip['port'],
+                                     proxy_ip=self.proxy_ip, proxy_port=self.proxy_port)
+                else:
+                    # 使用pip install pytdx
+                    self.api.connect(ip=self.best_ip['ip'], port=self.best_ip['port'])
+
                 self.write_log(f'创建tdx连接, : {self.best_ip}')
                 self.connection_status = True
 
@@ -210,12 +217,10 @@ class TdxStockData(object):
             tdx_code, market_str = symbol.split('.')
             # 1, 上交所 ， 0， 深交所
             market_id = 1 if market_str.upper() in ['XSHG', Exchange.SSE.value] else 0
-            self.symbol_exchange_dict.update({tdx_code: symbol})  # tdx合约与vn交易所的字典
             self.symbol_market_dict.update({tdx_code: market_id})  # tdx合约与tdx市场的字典
         else:
             market_id = get_tdx_market_code(symbol)
             tdx_code = symbol
-            self.symbol_exchange_dict.update({symbol: symbol})  # tdx合约与vn交易所的字典
             self.symbol_market_dict.update({symbol: market_id})  # tdx合约与tdx市场的字典
         name = self.get_name(tdx_code, market_id)
 
@@ -268,7 +273,7 @@ class TdxStockData(object):
 
             current_datetime = datetime.now()
             data = self.api.to_df(_bars)
-            data = data.assign(datetime=to_datetime(data['datetime']))
+            data = data.assign(datetime=pd.to_datetime(data['datetime']))
             data = data.assign(ticker=symbol)
             data['symbol'] = symbol
             data = data.drop(
@@ -368,16 +373,16 @@ class TdxStockData(object):
                    cache_date: str):
         """加载缓存数据"""
         if not os.path.exists(cache_folder):
-            self.write_error('缓存目录:{}不存在,不能读取'.format(cache_folder))
+            #self.write_error('缓存目录:{}不存在,不能读取'.format(cache_folder))
             return None
         cache_folder_year_month = os.path.join(cache_folder, cache_date[:6])
         if not os.path.exists(cache_folder_year_month):
-            self.write_error('缓存目录:{}不存在,不能读取'.format(cache_folder_year_month))
+            #self.write_error('缓存目录:{}不存在,不能读取'.format(cache_folder_year_month))
             return None
 
         cache_file = os.path.join(cache_folder_year_month, '{}_{}.pkb2'.format(cache_symbol, cache_date))
         if not os.path.isfile(cache_file):
-            self.write_error('缓存文件:{}不存在,不能读取'.format(cache_file))
+            #self.write_error('缓存文件:{}不存在,不能读取'.format(cache_file))
             return None
         with bz2.BZ2File(cache_file, 'rb') as f:
             data = pickle.load(f)
@@ -415,12 +420,10 @@ class TdxStockData(object):
         if '.' in symbol:
             tdx_code, market_str = symbol.split('.')
             market_code = 1 if market_str.upper() in ['XSHG', Exchange.SSE.value] else 0
-            self.symbol_exchange_dict.update({tdx_code: symbol})  # tdx合约与vn交易所的字典
             self.symbol_market_dict.update({tdx_code: market_code})  # tdx合约与tdx市场的字典
         else:
             market_code = get_tdx_market_code(symbol)
             tdx_code = symbol
-            self.symbol_exchange_dict.update({symbol: symbol})  # tdx合约与vn交易所的字典
             self.symbol_market_dict.update({symbol: market_code})  # tdx合约与tdx市场的字典
 
         symbol_config = self.symbol_dict.get(f'{tdx_code}_{market_code}', {})
@@ -506,3 +509,63 @@ class TdxStockData(object):
             self.write_error(
                 'exception in get_transaction_data:{},{},{}'.format(symbol, str(ex), traceback.format_exc()))
             return False, ret_datas
+
+    def get_stock_list(self, types=["stock_cn", "etf_cn", "bond_cn", "cb_cn"]):
+        """股票所有的code&name列表"""
+        if self.api is None:
+            self.connect()
+
+        data = pd.concat(
+            [pd.concat([self.api.to_df(self.api.get_security_list(j, i * 1000)).assign(sse='sz' if j == 0 else 'sh').set_index(
+                ['code', 'sse'], drop=False) for i in range(int(self.api.get_security_count(j) / 1000) + 1)], axis=0) for j
+                in range(2)], axis=0)
+        sz = data.query('sse=="sz"')
+        sh = data.query('sse=="sh"')
+        sz = sz.assign(sec=sz.code.apply(get_stock_type))
+        sh = sh.assign(sec=sh.code.apply(get_stock_type))
+
+        temp_df = pd.concat([sz, sh]).query('sec in ["{}"]'.format(types)).sort_index().assign(
+            name=data['name'].apply(lambda x: str(x)[0:6]))
+
+        hq_codelist = []
+
+        for i in range(0, len(temp_df)):
+            row = temp_df.iloc[i]
+            hq_codelist.append(
+                {
+                    "code": row['code'],
+                    "exchange":  Exchange.SSE.value if row['sse'] == 'sh' else Exchange.SZSE.value,
+                    "market_id": 1 if row['sse'] == 'sh' else 0,
+                    "name": row['name']
+
+                }
+            )
+
+        return hq_codelist
+
+    def get_security_quotes(self, all_stock, code=None):
+        """
+        支持三种形式的参数
+        get_security_quotes(market, code )
+        get_security_quotes((market, code))
+        get_security_quotes([(market1, code1), (market2, code2)] )
+        :param all_stock （market, code) 的数组
+        :param code{optional} code to query
+        :return:
+        """
+        if self.api is None:
+            self.connect()
+
+        return self.api.get_security_quotes(all_stock, code)
+
+    def get_stock_quotes_by_type(self, stock_type):
+        """根据股票代码类型，获取其最新行情"""
+        stock_list = [(stock.get('market_id'), stock.get('code')) for stock in self.symbol_dict.values() if stock.get('stock_type') == stock_type]
+
+        num_per_count = 60
+        results = []
+        for i in range(0, len(stock_list)+1, num_per_count):
+            cur_results = self.get_security_quotes(stock_list[i:i+num_per_count])
+            results.extend(cur_results)
+
+        return results

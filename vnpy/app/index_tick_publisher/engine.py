@@ -19,14 +19,14 @@ from vnpy.trader.event import EVENT_TIMER
 from vnpy.trader.object import TickData
 from vnpy.trader.utility import get_trading_date
 from vnpy.data.tdx.tdx_common import TDX_FUTURE_HOSTS
-from vnpy.app.cta_strategy_pro.base import (
+from vnpy.component.base import (
     NIGHT_MARKET_23,
     NIGHT_MARKET_SQ2,
     MARKET_DAY_ONLY)
 
 from vnpy.amqp.producer import publisher
 
-APP_NAME = 'INDEXDATAPUBLISHER'
+APP_NAME = 'Idx_Publisher'
 
 
 class IndexTickPublisher(BaseEngine):
@@ -387,11 +387,17 @@ class IndexTickPublisher(BaseEngine):
             else:
                 tick_datetime = tick_datetime.replace(microsecond=0)
 
+            # 通达信上能源的交易所为上期所，需要改正过来
+            if vn_symbol in ['NR99', 'SC99']:
+                exchange = Exchange.INE
+            else:
+                exchange = self.symbol_exchange_dict.get(tdx_symbol, Exchange.LOCAL)
+
             tick = TickData(
                 gateway_name='tdx',
                 symbol=vn_symbol,
                 datetime=tick_datetime,
-                exchange=self.symbol_exchange_dict.get(tdx_symbol, Exchange.LOCAL)
+                exchange=exchange
             )
 
             tick.pre_close = float(d.get('ZuoJie', 0.0))
@@ -472,6 +478,6 @@ class IndexTickPublisher(BaseEngine):
                 d = copy.copy(tick.__dict__)
                 if isinstance(tick.datetime, datetime):
                     d.update({'datetime': tick.datetime.strftime('%Y-%m-%d %H:%M:%S.%f')})
-                d.update({'exchange': tick.exchange.value()})
+                d.update({'exchange': tick.exchange.value})
                 d = json.dumps(d)
                 self.pub.pub(d)

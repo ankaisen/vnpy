@@ -160,7 +160,7 @@ class BackTestingEngine(object):
         self.net_capital = self.init_capital  # 实时资金净值（每日根据capital和持仓浮盈计算）
         self.max_capital = self.init_capital  # 资金最高净值
         self.max_net_capital = self.init_capital
-        self.avaliable = self.init_capital
+        self.available = self.init_capital
 
         self.max_pnl = 0  # 最高盈利
         self.min_pnl = 0  # 最大亏损
@@ -257,7 +257,7 @@ class BackTestingEngine(object):
         if self.net_capital == 0.0:
             self.percent = 0.0
 
-        return self.net_capital, self.avaliable, self.percent, self.percent_limit
+        return self.net_capital, self.available, self.percent, self.percent_limit
 
     def set_test_start_date(self, start_date: str = '20100416', init_days: int = 10):
         """设置回测的启动日期"""
@@ -290,7 +290,7 @@ class BackTestingEngine(object):
         self.net_capital = capital  # 实时资金净值（每日根据capital和持仓浮盈计算）
         self.max_capital = capital  # 资金最高净值
         self.max_net_capital = capital
-        self.avaliable = capital
+        self.available = capital
         self.init_capital = capital
 
     def set_margin_rate(self, vt_symbol: str, margin_rate: float):
@@ -333,8 +333,8 @@ class BackTestingEngine(object):
             self.fix_commission.update({vt_symbol: rate})
 
     def get_commission_rate(self, vt_symbol: str):
-        """ 获取保证金比例，缺省万分之一"""
-        return self.commission_rate.get(vt_symbol, float(0.00001))
+        """ 获取保证金比例，缺省千分之2"""
+        return self.commission_rate.get(vt_symbol, float(0.0004))
 
     def get_fix_commission(self, vt_symbol: str):
         return self.fix_commission.get(vt_symbol, 0)
@@ -354,7 +354,7 @@ class BackTestingEngine(object):
         return self.volume_tick.get(vt_symbol, 1)
 
     def set_contract(self, symbol: str, exchange: Exchange, product: Product, name: str, size: int,
-                     price_tick: float, volume_tick: float = 1, margin_rate: float = 0.1):
+                     price_tick: float, volume_tick: float = 0.1, margin_rate: float = 0.1):
         """设置合约信息"""
         vt_symbol = '.'.join([symbol, exchange.value])
         if vt_symbol not in self.contract_dict:
@@ -385,7 +385,7 @@ class BackTestingEngine(object):
     def get_exchange(self, symbol: str):
         return self.symbol_exchange_dict.get(symbol, Exchange.LOCAL)
 
-    def get_position(self, vt_symbol: str, direction: Direction, gateway_name: str = ''):
+    def get_position(self, vt_symbol: str, direction: Direction = Direction.NET, gateway_name: str = ''):
         """ 查询合约在账号的持仓"""
         if not gateway_name:
             gateway_name = self.gateway_name
@@ -418,6 +418,15 @@ class BackTestingEngine(object):
             )
             self.positions[k] = pos
         return pos
+
+    def get_strategy_value(self, strategy_name: str, parameter:str):
+        """获取策略的某个参数值"""
+        strategy = self.strategies.get(strategy_name)
+        if not strategy:
+            return None
+
+        value = getattr(strategy, parameter, None)
+        return value
 
     def set_name(self, test_name):
         """
@@ -545,14 +554,14 @@ class BackTestingEngine(object):
 
         for symbol, symbol_data in data_dict.items():
             self.write_log(u'配置{}数据:{}'.format(symbol, symbol_data))
-            self.set_price_tick(symbol, symbol_data.get('price_tick', 1))
-            self.set_volume_tick(symbol, symbol_data.get('min_volume', 1))
+            self.set_price_tick(symbol, symbol_data.get('price_tick', 0.01))
+            self.set_volume_tick(symbol, symbol_data.get('min_volume', 0.01))
             self.set_slippage(symbol, symbol_data.get('slippage', 0))
             self.set_size(symbol, symbol_data.get('symbol_size', 10))
             margin_rate = symbol_data.get('margin_rate', 0.1)
             self.set_margin_rate(symbol, margin_rate)
 
-            self.set_commission_rate(symbol, symbol_data.get('commission_rate', float(0.0001)))
+            self.set_commission_rate(symbol, symbol_data.get('commission_rate', float(0.0004)))
 
             self.set_contract(
                 symbol=symbol,
@@ -560,8 +569,8 @@ class BackTestingEngine(object):
                 exchange=Exchange(symbol_data.get('exchange', 'LOCAL')),
                 product=Product(symbol_data.get('product', "期货")),
                 size=symbol_data.get('symbol_size', 10),
-                price_tick=symbol_data.get('price_tick', 1),
-                volume_tick=symbol_data.get('min_volume', 1),
+                price_tick=symbol_data.get('price_tick', 0.01),
+                volume_tick=symbol_data.get('min_volume', 0.01),
                 margin_rate=margin_rate
             )
 
@@ -601,8 +610,8 @@ class BackTestingEngine(object):
     def new_bar(self, bar):
         """新的K线"""
         self.last_bar.update({bar.vt_symbol: bar})
-        if self.last_dt is None or (bar.datetime and bar.datetime > self.last_dt):
-            self.last_dt = bar.datetime
+        if self.last_dt is None or (bar.datetime and bar.datetime > self.last_dt - timedelta(seconds=self.bar_interval_seconds)):
+            self.last_dt = bar.datetime + timedelta(seconds=self.bar_interval_seconds)
         self.set_price(bar.vt_symbol, bar.close_price)
         self.cross_stop_order(bar=bar)  # 撮合停止单
         self.cross_limit_order(bar=bar)  # 先撮合限价单
@@ -649,6 +658,9 @@ class BackTestingEngine(object):
                     strategy_module_name = ".".join(
                         [module_name, filename.replace(".py", "")])
                 elif filename.endswith(".pyd"):
+                    strategy_module_name = ".".join(
+                        [module_name, filename.split(".")[0]])
+                elif filename.endswith(".so"):
                     strategy_module_name = ".".join(
                         [module_name, filename.split(".")[0]])
                 else:
@@ -827,7 +839,7 @@ class BackTestingEngine(object):
             direction=direction,
             offset=offset,
             type=order_type,
-            price=round_to(value=price, target=self.get_price_tick(symbol)),
+            price=round_to(value=price, target=self.get_price_tick(vt_symbol)),
             volume=volume,
             status=Status.NOTTRADED,
             time=str(self.last_dt)
@@ -887,7 +899,7 @@ class BackTestingEngine(object):
             if register_strategy.strategy_name != strategy.strategy_name:
                 return False
             order.status = Status.CANCELLED
-            order.cancelTime = str(self.last_dt)
+            order.cancel_time = str(self.last_dt)
             self.active_limit_orders.pop(vt_orderid, None)
             strategy.on_order(order)
             return True
@@ -941,7 +953,7 @@ class BackTestingEngine(object):
                 strategy_cond = strategy.strategy_name == order_strategy.strategy_name
 
             if offset_cond and symbol_cond and strategy_cond:
-                self.write_log(u'撤销订单:{},{} {}@{}'
+                self.write_log(u'撤销限价订单:{},{} {}@{}'
                                .format(vt_orderid, order.direction, order.price, order.volume))
                 order.status = Status.CANCELLED
                 order.cancel_time = str(self.last_dt)
@@ -1693,7 +1705,7 @@ class BackTestingEngine(object):
                                                                                                         0)
 
         # 可用资金 = 当前净值 - 占用保证金
-        self.avaliable = self.net_capital - occupy_money
+        self.available = self.net_capital - occupy_money
         # 当前保证金占比
         self.percent = round(float(occupy_money * 100 / self.net_capital), 2)
         # 更新最大保证金占比
@@ -1747,7 +1759,7 @@ class BackTestingEngine(object):
             self.write_log(msg)
 
         # 重新计算一次avaliable
-        self.avaliable = self.net_capital - occupy_money
+        self.available = self.net_capital - occupy_money
         self.percent = round(float(occupy_money * 100 / self.net_capital), 2)
 
     def saving_daily_data(self, d, c, m, commission, benchmark=0):
@@ -2155,7 +2167,7 @@ class BackTestingEngine(object):
         :param trade:
         :return:
         """
-        strategy_name = getattr(trade, 'strategy', self.test_name)
+        strategy_name = getattr(trade, 'strategy_name', self.test_name)
         trade_fields = ['symbol', 'exchange', 'vt_symbol', 'tradeid',
                         'vt_tradeid', 'orderid', 'vt_orderid',
                         'direction',
@@ -2220,7 +2232,7 @@ class TradingResult(object):
         self.volume = volume  # 交易数量（+/-代表方向）
         self.group_id = group_id  # 主交易ID（针对多手平仓）
 
-        self.turnover = (self.open_price + self.exit_price) * abs(volume) * margin_rate  # 成交金额(实际保证金金额）
+        self.turnover = (self.open_price + self.exit_price) * abs(volume)  # 成交金额(实际保证金金额）
         if fix_commission > 0:
             self.commission = fix_commission * abs(self.volume)
         else:

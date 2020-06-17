@@ -19,6 +19,8 @@ from vnpy.trader.utility import virtual, append_data, extract_vt_symbol, get_und
 from .base import StopOrder
 from vnpy.component.cta_grid_trade import CtaGrid, CtaGridTrade
 from vnpy.component.cta_position import CtaPosition
+from vnpy.component.cta_policy import CtaPolicy
+
 
 class CtaTemplate(ABC):
     """CTA策略模板"""
@@ -193,7 +195,7 @@ class CtaTemplate(ABC):
         """
         Send buy order to open a long position.
         """
-        if OrderType in [OrderType.FAK, OrderType.FOK]:
+        if order_type in [OrderType.FAK, OrderType.FOK]:
             if self.is_upper_limit(vt_symbol):
                 self.write_error(u'涨停价不做FAK/FOK委托')
                 return []
@@ -213,7 +215,7 @@ class CtaTemplate(ABC):
         """
         Send sell order to close a long position.
         """
-        if OrderType in [OrderType.FAK, OrderType.FOK]:
+        if order_type in [OrderType.FAK, OrderType.FOK]:
             if self.is_lower_limit(vt_symbol):
                 self.write_error(u'跌停价不做FAK/FOK sell委托')
                 return []
@@ -233,7 +235,7 @@ class CtaTemplate(ABC):
         """
         Send short order to open as short position.
         """
-        if OrderType in [OrderType.FAK, OrderType.FOK]:
+        if order_type in [OrderType.FAK, OrderType.FOK]:
             if self.is_lower_limit(vt_symbol):
                 self.write_error(u'跌停价不做FAK/FOK short委托')
                 return []
@@ -253,7 +255,7 @@ class CtaTemplate(ABC):
         """
         Send cover order to close a short position.
         """
-        if OrderType in [OrderType.FAK, OrderType.FOK]:
+        if order_type in [OrderType.FAK, OrderType.FOK]:
             if self.is_upper_limit(vt_symbol):
                 self.write_error(u'涨停价不做FAK/FOK cover委托')
                 return []
@@ -599,7 +601,8 @@ class CtaFutureTemplate(CtaTemplate):
 
     def init_policy(self):
         self.write_log(u'init_policy(),初始化执行逻辑')
-        self.policy.load()
+        if self.policy:
+            self.policy.load()
 
     def init_position(self):
         """
@@ -814,6 +817,7 @@ class CtaFutureTemplate(CtaTemplate):
                 # 开仓完毕( buy, short)
                 else:
                     grid.open_status = True
+                    grid.open_time = self.cur_datetime
                     self.write_log(f'{grid.direction.value}单已开仓完毕,order_price:{order.price}'
                                    + f',volume:{order.volume}')
 
@@ -853,6 +857,10 @@ class CtaFutureTemplate(CtaTemplate):
         grid = old_order.get('grid', None)
 
         pre_status = old_order.get('status', Status.NOTTRADED)
+        if pre_status == Status.CANCELLED:
+            self.write_log(f'当前状态已经是{Status.CANCELLED}，不做调整处理')
+            return
+
         old_order.update({'status': Status.CANCELLED})
         self.write_log(u'委托单状态:{}=>{}'.format(pre_status, old_order.get('status')))
         if grid:
@@ -862,7 +870,7 @@ class CtaFutureTemplate(CtaTemplate):
                 pre_traded_volume = grid.traded_volume
                 grid.traded_volume = round(grid.traded_volume + order.traded, 7)
                 self.write_log(f'撤单中部分开仓:{order.traded} + 原已成交:{pre_traded_volume}  => {grid.traded_volume}')
-            if len(grid.order_ids)==0:
+            if len(grid.order_ids) == 0:
                 grid.order_status = False
                 if grid.traded_volume > 0:
                     pre_volume = grid.volume
@@ -891,6 +899,10 @@ class CtaFutureTemplate(CtaTemplate):
 
         grid = old_order.get('grid', None)
         pre_status = old_order.get('status', Status.NOTTRADED)
+        if pre_status == Status.CANCELLED:
+            self.write_log(f'当前状态已经是{Status.CANCELLED}，不做调整处理')
+            return
+
         old_order.update({'status': Status.CANCELLED})
         self.write_log(u'委托单状态:{}=>{}'.format(pre_status, old_order.get('status')))
         if grid:
@@ -1277,7 +1289,7 @@ class CtaFutureTemplate(CtaTemplate):
                             and order_grid \
                             and len(order_grid.order_ids) == 0 \
                             and not order_grid.open_status \
-                            and not order_grid.order_status  \
+                            and not order_grid.order_status \
                             and order_grid.traded_volume == 0:
                         self.write_log(u'移除从未开仓成功的委托网格{}'.format(order_grid.__dict__))
                         order_info['grid'] = None
@@ -1297,41 +1309,47 @@ class CtaFutureTemplate(CtaTemplate):
             return
         self.account_pos = self.cta_engine.get_position(vt_symbol=self.vt_symbol, direction=Direction.NET)
         if self.account_pos:
-            self.write_log(f'账号{self.vt_symbol}持仓:{self.account_pos.volume}, 冻结:{self.account_pos.frozen}, 盈亏:{self.account_pos.pnl}')
+            self.write_log(
+                f'账号{self.vt_symbol}持仓:{self.account_pos.volume}, 冻结:{self.account_pos.frozen}, 盈亏:{self.account_pos.pnl}')
 
         up_grids_info = ""
         for grid in list(self.gt.up_grids):
             if not grid.open_status and grid.order_status:
-                up_grids_info += f'平空中: [已平:{grid.traded_volume} => 目标:{grid.volume}, 委托时间:{grid.order_time}\n'
+                up_grids_info += f'平空中: [已平:{grid.traded_volume} => 目标:{grid.volume}, 委托时间:{grid.order_time}]\n'
                 if len(grid.order_ids) > 0:
                     up_grids_info += f'委托单号:{grid.order_ids}'
                 continue
 
             if grid.open_status and not grid.order_status:
-                up_grids_info += f'持空中: [数量:{grid.volume}\n, 开仓时间:{grid.open_time}'
+                up_grids_info += f'持空中: [数量:{grid.volume}\n, 开仓时间:{grid.open_time}]\n'
                 continue
 
             if not grid.open_status and grid.order_status:
-                up_grids_info += f'开空中: [已开:{grid.traded_volume} => 目标:{grid.volume}, 委托时间:{grid.order_time}\n'
+                up_grids_info += f'开空中: [已开:{grid.traded_volume} => 目标:{grid.volume}, 委托时间:{grid.order_time}]\n'
                 if len(grid.order_ids) > 0:
                     up_grids_info += f'委托单号:{grid.order_ids}'
 
         dn_grids_info = ""
         for grid in list(self.gt.dn_grids):
             if not grid.open_status and grid.order_status:
-                up_grids_info += f'平多中: [已平:{grid.traded_volume} => 目标:{grid.volume}, 委托时间:{grid.order_time}\n'
+                dn_grids_info += f'平多中: [已平:{grid.traded_volume} => 目标:{grid.volume}, 委托时间:{grid.order_time}]\n'
                 if len(grid.order_ids) > 0:
-                    up_grids_info += f'委托单号:{grid.order_ids}'
+                    dn_grids_info += f'委托单号:{grid.order_ids}'
                 continue
 
             if grid.open_status and not grid.order_status:
-                up_grids_info += f'持多中: [数量:{grid.volume}\n, 开仓时间:{grid.open_time}'
+                dn_grids_info += f'持多中: [数量:{grid.volume}\n, 开仓时间:{grid.open_time}]\n'
                 continue
 
             if not grid.open_status and grid.order_status:
-                up_grids_info += f'开多中: [已开:{grid.traded_volume} => 目标:{grid.volume}, 委托时间:{grid.order_time}\n'
+                dn_grids_info += f'开多中: [已开:{grid.traded_volume} => 目标:{grid.volume}, 委托时间:{grid.order_time}]\n'
                 if len(grid.order_ids) > 0:
-                    up_grids_info += f'委托单号:{grid.order_ids}'
+                    dn_grids_info += f'委托单号:{grid.order_ids}'
+
+        if len(up_grids_info) > 0:
+            self.write_log(up_grids_info)
+        if len(dn_grids_info) > 0:
+            self.write_log(dn_grids_info)
 
     def display_tns(self):
         """显示事务的过程记录=》 log"""
@@ -1339,11 +1357,13 @@ class CtaFutureTemplate(CtaTemplate):
             return
         self.write_log(u'{} 当前 {}价格：{}'
                        .format(self.cur_datetime, self.vt_symbol, self.cur_price))
+
         if hasattr(self, 'policy'):
             policy = getattr(self, 'policy')
-            op = getattr(policy, 'to_json', None)
-            if callable(op):
-                self.write_log(u'当前Policy:{}'.format(json.dumps(policy.to_json(), indent=2, ensure_ascii=False)))
+            if policy:
+                op = getattr(policy, 'to_json', None)
+                if callable(op):
+                    self.write_log(u'当前Policy:{}'.format(json.dumps(policy.to_json(), indent=2, ensure_ascii=False)))
 
     def save_dist(self, dist_data):
         """
@@ -1360,6 +1380,8 @@ class CtaFutureTemplate(CtaTemplate):
                 dist_data.update({'margin': dist_data.get('price', 0) * dist_data.get('volume',
                                                                                       0) * self.cta_engine.get_margin_rate(
                     dist_data.get('symbol', self.vt_symbol))})
+            if 'datetime' not in dist_data:
+                dist_data.update({'datetime': self.cur_datetime})
             if self.position and 'long_pos' not in dist_data:
                 dist_data.update({'long_pos': self.position.long_pos})
             if self.position and 'short_pos' not in dist_data:
@@ -1392,3 +1414,92 @@ class CtaFutureTemplate(CtaTemplate):
         if self.backtesting:
             return
         self.cta_engine.send_wechat(msg=msg, strategy=self)
+
+
+class MultiContractPolicy(CtaPolicy):
+    """多合约Policy，记录持仓"""
+
+    def __init__(self, strategy=None, **kwargs):
+        super().__init__(strategy, **kwargs)
+        self.debug = kwargs.get('debug', False)
+        self.positions = {}  # vt_symbol: net_pos
+
+    def from_json(self, json_data):
+        """将数据从json_data中恢复"""
+        super().from_json(json_data)
+
+        self.positions = json_data.get('positions')
+
+    def to_json(self):
+        """转换至json文件"""
+        j = super().to_json()
+        j['positions'] = self.positions
+        return j
+
+    def on_trade(self, trade: TradeData):
+        """更新交易"""
+        pos = self.positions.get(trade.vt_symbol)
+
+        if pos is None:
+            pos = 0
+        pre_pos = pos
+        if trade.direction == Direction.LONG:
+            pos = round(pos + trade.volume, 7)
+
+        elif trade.direction == Direction.SHORT:
+            pos = round(pos - trade.volume, 7)
+
+        self.positions.update({trade.vt_symbol: pos})
+
+        if self.debug and self.strategy:
+            self.strategy.write_log(f'{trade.vt_symbol} pos:{pre_pos}=>{pos}')
+
+        self.save()
+
+
+class MultiContractTemplate(CtaTemplate):
+    """多合约交易模板"""
+
+    def __init__(self, cta_engine, strategy_name, vt_symbol, setting):
+
+        self.policy = None
+        self.cur_datetime = None
+        super().__init__(cta_engine, strategy_name, vt_symbol, setting)
+
+        self.policy = MultiContractPolicy(strategy=self, debug=True)
+
+    def sync_data(self):
+        """同步更新数据"""
+
+        if self.inited and self.trading:
+            self.write_log(u'保存policy数据')
+            self.policy.save()
+
+    def on_trade(self, trade: TradeData):
+        """成交回报事件处理"""
+        self.policy.on_trade(trade)
+
+    def get_positions(self):
+        """ 获取策略所有持仓详细"""
+        pos_list = []
+
+        for vt_symbol, pos in self.policy.positions.items():
+            pos_list.append({'vt_symbol': vt_symbol,
+                             'direction': 'long' if pos >= 0 else 'short',
+                             'volume': pos})
+
+        if self.cur_datetime and (datetime.now() - self.cur_datetime).total_seconds() < 10:
+            self.write_log(u'{}当前持仓:{}'.format(self.strategy_name, pos_list))
+        return pos_list
+
+    def on_order(self, order: OrderData):
+        pass
+
+    def on_init(self):
+        self.inited = True
+
+    def on_start(self):
+        self.trading = True
+
+    def on_stop(self):
+        self.trading = False

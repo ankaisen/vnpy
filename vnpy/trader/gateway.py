@@ -96,6 +96,8 @@ class BaseGateway(ABC):
         self.klines = {}
         self.status = {'name': gateway_name, 'con': False}
 
+        self.prices: Dict[str, float] = {}  # vt_symbol, last_price
+
         self.query_functions = []
 
     def create_logger(self):
@@ -123,7 +125,7 @@ class BaseGateway(ABC):
         Tick event of a specific vt_symbol is also pushed.
         """
         self.on_event(EVENT_TICK, tick)
-        self.on_event(EVENT_TICK + tick.vt_symbol, tick)
+        # self.on_event(EVENT_TICK + tick.vt_symbol, tick)
 
         # 推送Bar
         kline = self.klines.get(tick.vt_symbol, None)
@@ -142,7 +144,7 @@ class BaseGateway(ABC):
         Trade event of a specific vt_symbol is also pushed.
         """
         self.on_event(EVENT_TRADE, trade)
-        self.on_event(EVENT_TRADE + trade.vt_symbol, trade)
+        # self.on_event(EVENT_TRADE + trade.vt_symbol, trade)
 
     def on_order(self, order: OrderData) -> None:
         """
@@ -150,7 +152,7 @@ class BaseGateway(ABC):
         Order event of a specific vt_orderid is also pushed.
         """
         self.on_event(EVENT_ORDER, order)
-        self.on_event(EVENT_ORDER + order.vt_orderid, order)
+        # self.on_event(EVENT_ORDER + order.vt_orderid, order)
 
     def on_position(self, position: PositionData) -> None:
         """
@@ -158,7 +160,7 @@ class BaseGateway(ABC):
         Position event of a specific vt_symbol is also pushed.
         """
         self.on_event(EVENT_POSITION, position)
-        self.on_event(EVENT_POSITION + position.vt_symbol, position)
+        # self.on_event(EVENT_POSITION + position.vt_symbol, position)
 
     def on_account(self, account: AccountData) -> None:
         """
@@ -166,7 +168,7 @@ class BaseGateway(ABC):
         Account event of a specific vt_accountid is also pushed.
         """
         self.on_event(EVENT_ACCOUNT, account)
-        self.on_event(EVENT_ACCOUNT + account.vt_accountid, account)
+        # self.on_event(EVENT_ACCOUNT + account.vt_accountid, account)
 
     def on_log(self, log: LogData) -> None:
         """
@@ -329,13 +331,15 @@ class LocalOrderManager:
     Management tool to support use local order id for trading.
     """
 
-    def __init__(self, gateway: BaseGateway, order_prefix: str = ""):
+    def __init__(self, gateway: BaseGateway, order_prefix: str = "", order_rjust:int = 8):
         """"""
         self.gateway: BaseGateway = gateway
 
         # For generating local orderid
         self.order_prefix: str = order_prefix
+        self.order_rjust: int = order_rjust
         self.order_count: int = 0
+
         self.orders: Dict[str, OrderData] = {}  # local_orderid: order
 
         # Map between local and system orderid
@@ -360,7 +364,7 @@ class LocalOrderManager:
         Generate a new local orderid.
         """
         self.order_count += 1
-        local_orderid = self.order_prefix + str(self.order_count).rjust(8, "0")
+        local_orderid = self.order_prefix + str(self.order_count).rjust(self.order_rjust, "0")
         return local_orderid
 
     def get_local_orderid(self, sys_orderid: str) -> str:
@@ -419,8 +423,11 @@ class LocalOrderManager:
 
     def get_order_with_local_orderid(self, local_orderid: str) -> OrderData:
         """"""
-        order = self.orders[local_orderid]
-        return copy(order)
+        order = self.orders.get(local_orderid, None)
+        if order:
+            return copy(order)
+        else:
+            return None
 
     def on_order(self, order: OrderData) -> None:
         """
