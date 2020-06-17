@@ -43,6 +43,7 @@ class Status(Enum):
     CANCELLED = "已撤销"
     CANCELLING = "撤销中"
     REJECTED = "拒单"
+    UNKNOWN = "未知"
 
 
 class Product(Enum):
@@ -95,9 +96,12 @@ class Exchange(Enum):
     SZSE = "SZSE"           # Shenzhen Stock Exchange
     SGE = "SGE"             # Shanghai Gold Exchange
     WXE = "WXE"             # Wuxi Steel Exchange
+    CFETS = "CFETS"         # China Foreign Exchange Trade System
 
     # Global
     SMART = "SMART"         # Smart Router for US stocks
+    NYSE = "NYSE"           # New York Stock Exchnage
+    NASDAQ = "NASDAQ"       # Nasdaq Exchange
     NYMEX = "NYMEX"         # New York Mercantile Exchange
     COMEX = "COMEX"         # a division of theNew York Mercantile Exchange
     GLOBEX = "GLOBEX"       # Globex of CME
@@ -119,6 +123,7 @@ class Exchange(Enum):
     TOCOM = "TOCOM"         # Tokyo Commodity Exchange
     EUNX = "EUNX"           # Euronext Exchange
     KRX = "KRX"             # Korean Exchange
+    AMEX = "AMEX"           # NESE American
 
     OANDA = "OANDA"         # oanda.com
 
@@ -158,3 +163,13 @@ class Interval(Enum):
     DAILY = "d"
     WEEKLY = "w"
     RENKO = 'renko'
+
+class StockType(Enum):
+    """股票类型（tdx）"""
+    STOCK = 'stock_cn'   # 股票
+    STOCKB = 'stockB_cn' # 深圳B股票（特别）
+    INDEX = 'index_cn'   # 指数
+    BOND = 'bond_cn'     # 企业债券
+    ETF = 'etf_cn'       # ETF
+    CB = 'cb_cn'         # 可转债
+    UNDEFINED = 'undefined' # 未定义

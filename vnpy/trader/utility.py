@@ -166,12 +166,19 @@ def get_trading_date(dt: datetime = None):
     else:
         return dt.strftime('%Y-%m-%d')
 
-
 def extract_vt_symbol(vt_symbol: str) -> Tuple[str, Exchange]:
     """
     :return: (symbol, exchange)
     """
-    symbol, exchange_str = vt_symbol.split(".")
+    if '.' in vt_symbol:
+        symbol, exchange_str = vt_symbol.split('.')
+    elif vt_symbol.isdigit():
+        symbol = vt_symbol
+        exchange_str = get_stock_exchange(code=symbol)
+    else:
+        symbol = vt_symbol
+        exchange_str = Exchange.LOCAL.value
+
     return symbol, Exchange(exchange_str)
 
 
@@ -337,7 +344,7 @@ def get_csv_last_dt(file_name, dt_index=0, dt_format='%Y-%m-%d %H:%M:%S', line_l
                     return None
         return None
 
-def append_data(file_name: str, dict_data: dict, field_names: list = []):
+def append_data(file_name: str, dict_data: dict, field_names: list = [], auto_header=True, encoding='utf8'):
     """
     添加数据到csv文件中
     :param file_name:  csv的文件全路径
@@ -347,15 +354,16 @@ def append_data(file_name: str, dict_data: dict, field_names: list = []):
     dict_fieldnames = sorted(list(dict_data.keys())) if len(field_names) == 0 else field_names
 
     try:
-        if not os.path.exists(file_name):
+        if not os.path.exists(file_name): # or os.path.getsize(file_name) == 0:
             print(u'create csv file:{}'.format(file_name))
             with open(file_name, 'a', encoding='utf8', newline='\n') as csvWriteFile:
                 writer = csv.DictWriter(f=csvWriteFile, fieldnames=dict_fieldnames, dialect='excel')
-                print(u'write csv header:{}'.format(dict_fieldnames))
-                writer.writeheader()
+                if auto_header:
+                    print(u'write csv header:{}'.format(dict_fieldnames))
+                    writer.writeheader()
                 writer.writerow(dict_data)
         else:
-            with open(file_name, 'a', encoding='utf8', newline='\n') as csvWriteFile:
+            with open(file_name, 'a', encoding=encoding, newline='\n') as csvWriteFile:
                 writer = csv.DictWriter(f=csvWriteFile, fieldnames=dict_fieldnames, dialect='excel',
                                         extrasaction='ignore')
                 writer.writerow(dict_data)
@@ -667,11 +675,11 @@ class BarGenerator:
     """
 
     def __init__(
-            self,
-            on_bar: Callable,
-            window: int = 0,
-            on_window_bar: Callable = None,
-            interval: Interval = Interval.MINUTE
+        self,
+        on_bar: Callable,
+        window: int = 0,
+        on_window_bar: Callable = None,
+        interval: Interval = Interval.MINUTE
     ):
         """Constructor"""
         self.bar: BarData = None
@@ -797,11 +805,14 @@ class BarGenerator:
         """
         Generate the bar data and call callback immediately.
         """
-        self.bar.datetime = self.bar.datetime.replace(
-            second=0, microsecond=0
-        )
-        self.on_bar(self.bar)
+        bar = self.bar
+
+        if self.bar:
+            bar.datetime = bar.datetime.replace(second=0, microsecond=0)
+            self.on_bar(bar)
+
         self.bar = None
+        return bar
 
 
 class ArrayManager(object):
@@ -1060,11 +1071,11 @@ class ArrayManager(object):
         return result[-1]
 
     def macd(
-            self,
-            fast_period: int,
-            slow_period: int,
-            signal_period: int,
-            array: bool = False
+        self,
+        fast_period: int,
+        slow_period: int,
+        signal_period: int,
+        array: bool = False
     ) -> Union[
         Tuple[np.ndarray, np.ndarray, np.ndarray],
         Tuple[float, float, float]
@@ -1152,10 +1163,10 @@ class ArrayManager(object):
         return result[-1]
 
     def boll(
-            self,
-            n: int,
-            dev: float,
-            array: bool = False
+        self,
+        n: int,
+        dev: float,
+        array: bool = False
     ) -> Union[
         Tuple[np.ndarray, np.ndarray],
         Tuple[float, float]
@@ -1172,10 +1183,10 @@ class ArrayManager(object):
         return up, down
 
     def keltner(
-            self,
-            n: int,
-            dev: float,
-            array: bool = False
+        self,
+        n: int,
+        dev: float,
+        array: bool = False
     ) -> Union[
         Tuple[np.ndarray, np.ndarray],
         Tuple[float, float]
@@ -1192,7 +1203,7 @@ class ArrayManager(object):
         return up, down
 
     def donchian(
-            self, n: int, array: bool = False
+        self, n: int, array: bool = False
     ) -> Union[
         Tuple[np.ndarray, np.ndarray],
         Tuple[float, float]
@@ -1208,10 +1219,9 @@ class ArrayManager(object):
         return up[-1], down[-1]
 
     def aroon(
-            self,
-            n: int,
-            dev: float,
-            array: bool = False
+        self,
+        n: int,
+        array: bool = False
     ) -> Union[
         Tuple[np.ndarray, np.ndarray],
         Tuple[float, float]

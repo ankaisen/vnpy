@@ -96,6 +96,7 @@ class BarData(BaseData):
     trading_day: str = ""  # '%Y-%m-%d'
 
     interval: Interval = None  # constant.py Internal 1m, 1h, 1d, 1w .etc
+    interval_num: int = 1   # 5 for 5m, 5h etc
     volume: float = 0
     open_interest: float = 0
     open_price: float = 0
@@ -135,7 +136,7 @@ class OrderData(BaseData):
     exchange: Exchange
     orderid: str
     sys_orderid: str = ""
-
+    accountid: str = ""
     type: OrderType = OrderType.LIMIT
     direction: Direction = ""
     offset: Offset = Offset.NONE
@@ -143,6 +144,7 @@ class OrderData(BaseData):
     volume: float = 0
     traded: float = 0
     status: Status = Status.SUBMITTING
+    datetime: datetime = None
     time: str = ""
     cancel_time: str = ""
 
@@ -150,6 +152,7 @@ class OrderData(BaseData):
         """"""
         self.vt_symbol = f"{self.symbol}.{self.exchange.value}"
         self.vt_orderid = f"{self.gateway_name}.{self.orderid}"
+        self.vt_accountid = f"{self.gateway_name}.{self.accountid}"
 
     def is_active(self) -> bool:
         """
@@ -182,6 +185,7 @@ class TradeData(BaseData):
     orderid: str
     tradeid: str
     sys_orderid: str = ""
+    accountid: str = ""
 
     direction: Direction = ""
 
@@ -203,7 +207,7 @@ class TradeData(BaseData):
         self.vt_symbol = f"{self.symbol}.{self.exchange.value}"
         self.vt_orderid = f"{self.gateway_name}.{self.orderid}"
         self.vt_tradeid = f"{self.gateway_name}.{self.tradeid}"
-
+        self.vt_accountid = f"{self.gateway_name}.{self.accountid}"
 
 @dataclass
 class PositionData(BaseData):
@@ -214,12 +218,14 @@ class PositionData(BaseData):
     symbol: str
     exchange: Exchange
     direction: Direction
-
+    accountid: str = ""   # 账号id
+    name: str = ""
     volume: float = 0
     frozen: float = 0
     price: float = 0
     pnl: float = 0
     yd_volume: float = 0
+    cur_price: float = 0  # 当前价
 
     # 股票相关
     holder_id: str = ""  # 股东代码
@@ -228,7 +234,9 @@ class PositionData(BaseData):
         """"""
         self.vt_symbol = f"{self.symbol}.{self.exchange.value}"
         self.vt_positionid = f"{self.gateway_name}.{self.vt_symbol}.{self.direction.value}"
-
+        self.vt_accountid = f"{self.gateway_name}.{self.accountid}"
+        if self.name == "":
+            self.name = self.vt_symbol
 
 @dataclass
 class AccountData(BaseData):

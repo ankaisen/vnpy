@@ -1,5 +1,6 @@
 from typing import Any, Dict, List
 from datetime import datetime
+from functools import lru_cache
 
 from vnpy.api.xtp import MdApi, TdApi
 from vnpy.event import EventEngine
@@ -24,37 +25,41 @@ from vnpy.trader.object import (
     PositionData,
     AccountData
 )
-from vnpy.trader.utility import get_folder_path
+from vnpy.trader.utility import get_folder_path, print_dict, extract_vt_symbol
 
-
+# 市场id <=> Exchange
 MARKET_XTP2VT: Dict[int, Exchange] = {
     1: Exchange.SZSE,
     2: Exchange.SSE
 }
 MARKET_VT2XTP: Dict[Exchange, int] = {v: k for k, v in MARKET_XTP2VT.items()}
 
+# 交易所id <=> Exchange
 EXCHANGE_XTP2VT: Dict[int, Exchange] = {
     1: Exchange.SSE,
     2: Exchange.SZSE,
 }
 EXCHANGE_VT2XTP: Dict[Exchange, int] = {v: k for k, v in EXCHANGE_XTP2VT.items()}
 
+# 方向  <=> Direction, Offset
 DIRECTION_STOCK_XTP2VT: Dict[int, Any] = {
-    1: (Direction.LONG, Offset.NONE),
-    2: (Direction.SHORT, Offset.NONE),
-    21: (Direction.LONG, Offset.OPEN),
-    22: (Direction.SHORT, Offset.OPEN),
-    24: (Direction.LONG, Offset.CLOSE),
-    23: (Direction.SHORT, Offset.CLOSE)
+    1: (Direction.LONG, Offset.NONE),    # 买
+    2: (Direction.SHORT, Offset.NONE),   # 卖
+    21: (Direction.LONG, Offset.OPEN),   # 多，开
+    22: (Direction.SHORT, Offset.OPEN),  # 空，开
+    24: (Direction.LONG, Offset.CLOSE),  # 多，平
+    23: (Direction.SHORT, Offset.CLOSE)  # 空， 平
 }
 DIRECTION_STOCK_VT2XTP: Dict[Any, int] = {v: k for k, v in DIRECTION_STOCK_XTP2VT.items()}
 
+# 期权方向 <=> Direction
 DIRECTION_OPTION_XTP2VT: Dict[int, Direction] = {
     1: Direction.LONG,
     2: Direction.SHORT
 }
 DIRECTION_OPTION_VT2XTP: Dict[Direction, int] = {v: k for k, v in DIRECTION_OPTION_XTP2VT.items()}
 
+# 持仓方向 <=> Direction
 POSITION_DIRECTION_XTP2VT = {
     0: Direction.NET,
     1: Direction.LONG,
@@ -62,17 +67,20 @@ POSITION_DIRECTION_XTP2VT = {
     3: Direction.SHORT
 }
 
+# 委托单类型
 ORDERTYPE_XTP2VT: Dict[int, OrderType] = {
     1: OrderType.LIMIT,
     2: OrderType.MARKET
 }
 ORDERTYPE_VT2XTP: Dict[OrderType, int] = {v: k for k, v in ORDERTYPE_XTP2VT.items()}
 
+# 协议类型
 PROTOCOL_VT2XTP: Dict[str, int] = {
     "TCP": 1,
     "UDP": 2
 }
 
+# 状态 <=> Status
 STATUS_XTP2VT: Dict[int, Status] = {
     0: Status.SUBMITTING,
     1: Status.ALLTRADED,
@@ -84,6 +92,7 @@ STATUS_XTP2VT: Dict[int, Status] = {
     7: Status.SUBMITTING
 }
 
+# 合约类型 <=> Product
 PRODUCT_XTP2VT: Dict[int, Product] = {
     0: Product.EQUITY,
     1: Product.INDEX,
@@ -94,6 +103,7 @@ PRODUCT_XTP2VT: Dict[int, Product] = {
     6: Product.OPTION
 }
 
+# 开平仓 <=> Offset
 OFFSET_VT2XTP: Dict[Offset, int] = {
     Offset.NONE: 0,
     Offset.OPEN: 1,
@@ -103,6 +113,7 @@ OFFSET_VT2XTP: Dict[Offset, int] = {
 }
 OFFSET_XTP2VT: Dict[int, Offset] = {v: k for k, v in OFFSET_VT2XTP.items()}
 
+# 业务类型 <=> xtp
 BUSINESS_VT2XTP: Dict[Any, int] = {
     "CASH": 0,
     Offset.NONE: 0,
@@ -112,9 +123,14 @@ BUSINESS_VT2XTP: Dict[Any, int] = {
     "OPTION": 10,
 }
 
+# 代码 <=> 中文名称
 symbol_name_map: Dict[str, str] = {}
+# 代码 <=> 交易所
 symbol_exchange_map: Dict[str, Exchange] = {}
 
+@lru_cache()
+def get_vt_symbol_name(vt_symbol):
+    return symbol_name_map.get(vt_symbol, vt_symbol.split('.')[0])
 
 class XtpGateway(BaseGateway):
 
@@ -130,11 +146,12 @@ class XtpGateway(BaseGateway):
         "授权码": ""
     }
 
+    # 接口支持得交易所清单
     exchanges: List[Exchange] = list(EXCHANGE_VT2XTP.keys())
 
-    def __init__(self, event_engine: EventEngine):
+    def __init__(self, event_engine: EventEngine, gateway_name='XTP'):
         """"""
-        super().__init__(event_engine, "XTP")
+        super().__init__(event_engine, gateway_name=gateway_name)
 
         self.md_api = XtpMdApi(self)
         self.td_api = XtpTdApi(self)
@@ -183,7 +200,7 @@ class XtpGateway(BaseGateway):
     def process_timer_event(self, event) -> None:
         """"""
         self.count += 1
-        if self.count < 2:
+        if self.count < 5:
             return
         self.count = 0
 
@@ -231,7 +248,12 @@ class XtpMdApi(MdApi):
         self.login_status = False
         self.gateway.write_log(f"行情服务器连接断开, 原因{reason}")
 
-        n = self.login()
+        n = self.login(
+            self.server_ip,
+            self.server_port,
+            self.userid,
+            self.password,
+            self.protocol)
 
         if n:
             self.session_id = n
@@ -258,7 +280,7 @@ class XtpMdApi(MdApi):
         pass
 
     def onDepthMarketData(self, data: dict) -> None:
-        """"""
+        """深度行情回报"""
         timestamp = str(data["data_time"])
         dt = datetime.strptime(timestamp, "%Y%m%d%H%M%S%f")
 
@@ -266,6 +288,9 @@ class XtpMdApi(MdApi):
             symbol=data["ticker"],
             exchange=EXCHANGE_XTP2VT[data["exchange_id"]],
             datetime=dt,
+            date=dt.strftime('%Y-%m-%d'),
+            time=dt.strftime('%H:%M:%S.%f'),
+            trading_day=dt.strftime('%Y-%m-%d'),
             volume=data["qty"],
             last_price=data["last_price"],
             limit_up=data["upper_limit_price"],
@@ -282,7 +307,8 @@ class XtpMdApi(MdApi):
         tick.bid_volume_1, tick.bid_volume_2, tick.bid_volume_3, tick.bid_volume_4, tick.bid_volume_5 = data["bid_qty"][0:5]
         tick.ask_volume_1, tick.ask_volume_2, tick.ask_volume_3, tick.ask_volume_4, tick.ask_volume_5 = data["ask_qty"][0:5]
 
-        tick.name = symbol_name_map.get(tick.vt_symbol, tick.symbol)
+        tick.name = get_vt_symbol_name(tick.vt_symbol)
+        self.gateway.prices.update({tick.vt_symbol: tick.last_price})
         self.gateway.on_tick(tick)
 
     def onSubOrderBook(self, data: dict, error: dict, last: bool) -> None:
@@ -334,7 +360,7 @@ class XtpMdApi(MdApi):
         pass
 
     def onQueryAllTickers(self, data: dict, error: dict, last: bool) -> None:
-        """"""
+        """合约信息回报"""
         contract = ContractData(
             symbol=data["ticker"],
             exchange=EXCHANGE_XTP2VT[data["exchange_id"]],
@@ -345,10 +371,20 @@ class XtpMdApi(MdApi):
             min_volume=data["buy_qty_unit"],
             gateway_name=self.gateway_name
         )
+        #if contract.symbol.startswith('1230'):
+        #    self.gateway.write_log(msg=f'合约信息:{contract.__dict__}')
         self.gateway.on_contract(contract)
 
+        # 更新最新价
+        pre_close_price = float(data["pre_close_price"])
+        vt_symbol = contract.vt_symbol
+        if vt_symbol not in self.gateway.prices and pre_close_price>0:
+            self.gateway.prices.update({vt_symbol: pre_close_price})
+
+        # 更新 symbol <=> 中文名称映射
         symbol_name_map[contract.vt_symbol] = contract.name
 
+        # 更新 股票代码 <=> 交易所
         if contract.product != Product.INDEX:
             symbol_exchange_map[contract.symbol] = contract.exchange
 
@@ -356,8 +392,17 @@ class XtpMdApi(MdApi):
             self.gateway.write_log(f"{contract.exchange.value}合约信息查询成功")
 
     def onQueryTickersPriceInfo(self, data: dict, error: dict, last: bool) -> None:
-        """"""
-        pass
+        """查询最新价"""
+        self.gateway.write_log('最新价:{}'.format(print_dict(data)))
+        symbol = data.get('ticker')
+        exchange_id = data.get('exchange_id')
+        last_price = float(data.get('last_price', 0))
+
+        if symbol and exchange_id and last_price > 0:
+            exchange = EXCHANGE_XTP2VT[exchange_id]
+            vt_symbol = f'{symbol}.{exchange.value}'
+            self.gateway.prices.update({vt_symbol: last_price})
+            self.gateway.write_log(f'{vt_symbol} 最新价: {last_price}')
 
     def onSubscribeAllOptionMarketData(self, data: dict, error: dict) -> None:
         """"""
@@ -440,7 +485,7 @@ class XtpMdApi(MdApi):
             self.subscribeMarketData(req.symbol, 1, xtp_exchange)
 
     def query_contract(self) -> None:
-        """"""
+        """查询合约明细"""
         for exchange_id in EXCHANGE_XTP2VT.keys():
             self.queryAllTickers(exchange_id)
 
@@ -465,6 +510,10 @@ class XtpTdApi(TdApi):
         self.reqid: int = 0
         self.protocol: int = 0
 
+        # 证券资产
+        self.security_asset = None  # 未查询获取持仓时，是None，如果查询过，无持仓，为0
+        self.security_volumes: Dict[str, int] = {}  # vt_symbol, volume
+
         # Whether current account supports margin or option
         self.margin_trading = False
         self.option_trading = False
@@ -487,21 +536,26 @@ class XtpTdApi(TdApi):
         self.gateway.write_error("交易接口报错", error)
 
     def onOrderEvent(self, data: dict, error: dict, session: int) -> None:
-        """"""
+        """委托回报"""
         if error["error_id"]:
             self.gateway.write_error("交易委托失败", error)
 
         symbol = data["ticker"]
         if len(symbol) == 8:
+            # 期权
             direction = DIRECTION_OPTION_XTP2VT[data["side"]]
             offset = OFFSET_XTP2VT[data["position_effect"]]
         else:
+            # 股票
             direction, offset = DIRECTION_STOCK_XTP2VT[data["side"]]
-
+        insert_time = str(data["insert_time"])
+        dt = datetime.strptime(insert_time, '%Y%m%d%H%M%S%f')
         order = OrderData(
+            accountid=self.userid,
             symbol=symbol,
             exchange=MARKET_XTP2VT[data["market"]],
             orderid=str(data["order_xtp_id"]),
+            sys_orderid=str(data["order_xtp_id"]),
             type=ORDERTYPE_XTP2VT[data["price_type"]],
             direction=direction,
             offset=offset,
@@ -509,7 +563,8 @@ class XtpTdApi(TdApi):
             volume=data["quantity"],
             traded=data["qty_traded"],
             status=STATUS_XTP2VT[data["order_status"]],
-            time=data["insert_time"],
+            datetime=dt,
+            time=dt.strftime('%H:%M:%S'),
             gateway_name=self.gateway_name
         )
 
@@ -524,16 +579,22 @@ class XtpTdApi(TdApi):
         else:
             direction, offset = DIRECTION_STOCK_XTP2VT[data["side"]]
 
+        trade_time = str(data["trade_time"])
+        dt = datetime.strptime(trade_time,'%Y%m%d%H%M%S%f')
+
         trade = TradeData(
+            accountid=self.userid,
             symbol=symbol,
             exchange=MARKET_XTP2VT[data["market"]],
             orderid=str(data["order_xtp_id"]),
+            sys_orderid=str(data["order_xtp_id"]),
             tradeid=str(data["exec_id"]),
             direction=direction,
             offset=offset,
             price=data["price"],
             volume=data["quantity"],
-            time=data["trade_time"],
+            datetime=dt,
+            time=dt.strftime('%H:%M:%S'),
             gateway_name=self.gateway_name
         )
 
@@ -562,22 +623,55 @@ class XtpTdApi(TdApi):
         last: bool,
         session: int
     ) -> None:
-        """"""
+        """普通账号持仓"""
+        # self.gateway.write_log(f"------\n {print_dict(data)}")
+
         if data["market"] == 0:
             return
-
+        vt_symbol = '{}.{}'.format(data["ticker"], MARKET_XTP2VT[data["market"]].value)
         position = PositionData(
+            accountid=self.userid,
             symbol=data["ticker"],
             exchange=MARKET_XTP2VT[data["market"]],
+            name=data["ticker_name"],
             direction=POSITION_DIRECTION_XTP2VT[data["position_direction"]],
             volume=data["total_qty"],
             frozen=data["locked_position"],
             price=data["avg_price"],
             pnl=data["unrealized_pnl"],
             yd_volume=data["yesterday_position"],
-            gateway_name=self.gateway_name
+            gateway_name=self.gateway_name,
+            cur_price=self.gateway.prices.get(vt_symbol,0)
         )
+        if position.volume > 0 and position.cur_price > 0:
+            position.pnl = round(position.volume * (position.cur_price - position.price),2)
         self.gateway.on_position(position)
+
+        # 如果持仓>0 获取持仓对应的当前最新价
+        if position.volume > 0 and vt_symbol not in self.gateway.prices:
+            req = SubscribeRequest(symbol=position.symbol, exchange=position.exchange)
+            self.gateway.subscribe(req)
+            self.security_volumes.update({vt_symbol: data["total_qty"]})
+
+    def update_security_asset(self):
+        """更新资产净值"""
+        #self.gateway.write_log(f'更新资产净值')
+        total_asset = 0
+        for vt_symbol, volume in self.security_volumes.items():
+            price = self.gateway.prices.get(vt_symbol, None)
+            # 获取不到股票的最新价，所以当前security_asset不可用
+            if price is None:
+                self.gateway.write_log(f'取不到:{vt_symbol}的价格')
+                self.security_asset = None
+                symbol, exchange = extract_vt_symbol(vt_symbol)
+                req = SubscribeRequest(symbol=symbol, exchange=exchange)
+                self.gateway.subscribe(req)
+                return
+
+            total_asset += volume * price
+            #self.gateway.write_log(f'资产净值 => {total_asset}')
+
+        self.security_asset = total_asset
 
     def onQueryAsset(
         self,
@@ -588,13 +682,32 @@ class XtpTdApi(TdApi):
         session: int
     ) -> None:
         """"""
-        account = AccountData(
-            accountid=self.userid,
-            balance=data["buying_power"],
-            frozen=data["withholding_amount"],
-            gateway_name=self.gateway_name
-        )
-        self.gateway.on_account(account)
+        #  XTP_ACCOUNT_NORMAL = 0,	///<普通账户
+        #  XTP_ACCOUNT_CREDIT,	1	///<信用账户
+        #  XTP_ACCOUNT_DERIVE,	2	///<衍生品账户
+        #  XTP_ACCOUNT_UNKNOWN	3	///<未知账户类型
+        if data['account_type'] != 0:
+            return
+
+        # self.gateway.write_log(print_dict(data))
+        self.update_security_asset()
+
+        if self.security_asset is not None:
+            cash_asset = data["total_asset"]
+            balance = cash_asset + self.security_asset
+
+            account = AccountData(
+                accountid=self.userid,
+                balance=balance,      # 总资产
+                margin=self.security_asset,    # 证券资产
+                frozen=data["withholding_amount"],
+                gateway_name=self.gateway_name,
+                trading_day=datetime.now().strftime('%Y-%m-%d')
+            )
+            # AccountData缺省的available 计算方法有误，这里直接取可用资金
+            account.available = cash_asset
+
+            self.gateway.on_account(account)
 
         if data["account_type"] == 1:
             self.margin_trading = True
@@ -641,7 +754,8 @@ class XtpTdApi(TdApi):
         last: bool,
         session: int
     ) -> None:
-        """"""
+        """信用账号持仓"""
+        self.gateway.write_log(f"------\n {print_dict(data)}")
         if data["debt_type"] == 1:
             symbol = data["ticker"]
             exchange = MARKET_XTP2VT[data["market"]]
@@ -649,10 +763,12 @@ class XtpTdApi(TdApi):
             position = self.short_positions.get(symbol, None)
             if not position:
                 position = PositionData(
+                    accountid=self.userid,
                     symbol=symbol,
                     exchange=exchange,
                     direction=Direction.SHORT,
-                    gateway_name=self.gateway_name
+                    gateway_name=self.gateway_name,
+                    cur_price=self.gateway.prices.get(f'{symbol}.{exchange.value}',0.0)
                 )
                 self.short_positions[symbol] = position
 
@@ -745,12 +861,13 @@ class XtpTdApi(TdApi):
 
         # stock type
         else:
+            req.offset = Offset.NONE
             xtp_req = {
                 "ticker": req.symbol,
                 "market": MARKET_VT2XTP[req.exchange],
                 "price": req.price,
                 "quantity": int(req.volume),
-                "side": DIRECTION_STOCK_VT2XTP.get((req.direction, req.offset), ""),
+                "side": DIRECTION_STOCK_VT2XTP.get((req.direction,req.offset), ""),
                 "price_type": ORDERTYPE_VT2XTP[req.type],
                 "business_type": BUSINESS_VT2XTP[req.offset]
             }
@@ -758,6 +875,10 @@ class XtpTdApi(TdApi):
         orderid = self.insertOrder(xtp_req, self.session_id)
 
         order = req.create_order_data(str(orderid), self.gateway_name)
+        order.accountid = self.userid
+        if order.datetime is None:
+            order.datetime = datetime.now()
+            order.time = order.datetime.strftime('%H:%M:%S.%f')
         self.gateway.on_order(order)
 
         return order.vt_orderid
@@ -765,6 +886,7 @@ class XtpTdApi(TdApi):
     def cancel_order(self, req: CancelRequest) -> None:
         """"""
         self.cancelOrder(int(req.orderid), self.session_id)
+        return True
 
     def query_account(self) -> None:
         """"""

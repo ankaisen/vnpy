@@ -19,6 +19,7 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from copy import copy
 from functools import lru_cache
+from uuid import uuid1
 
 from vnpy.event import Event, EventEngine
 from vnpy.trader.engine import BaseEngine, MainEngine
@@ -27,7 +28,10 @@ from vnpy.trader.object import (
     SubscribeRequest,
     LogData,
     TickData,
-    ContractData
+    ContractData,
+    HistoryRequest,
+    Interval,
+    BarData
 )
 from vnpy.trader.event import (
     EVENT_TIMER,
@@ -37,9 +41,11 @@ from vnpy.trader.event import (
     EVENT_TRADE,
     EVENT_POSITION,
     EVENT_STRATEGY_POS,
+    EVENT_STRATEGY_SNAPSHOT
 )
 from vnpy.trader.constant import (
     Direction,
+    Exchange,
     OrderType,
     Offset,
     Status
@@ -52,7 +58,8 @@ from vnpy.trader.utility import (
     TRADER_DIR,
     get_folder_path,
     get_underlying_symbol,
-    append_data)
+    append_data,
+    import_module_by_str)
 
 from vnpy.trader.util_logger import setup_logger, logging
 from vnpy.trader.util_wechat import send_wx_msg
@@ -203,21 +210,29 @@ class CtaEngine(BaseEngine):
 
     def process_timer_event(self, event: Event):
         """ 处理定时器事件"""
-
+        all_trading = True
         # 触发每个策略的定时接口
         for strategy in list(self.strategies.values()):
             strategy.on_timer()
+            if not strategy.trading:
+                all_trading = False
 
         dt = datetime.now()
-
+        # 每分钟执行的逻辑
         if self.last_minute != dt.minute:
             self.last_minute = dt.minute
 
-            # 主动获取所有策略得持仓信息
-            all_strategy_pos = self.get_all_strategy_pos()
+            if all_trading:
+                # 主动获取所有策略得持仓信息
+                all_strategy_pos = self.get_all_strategy_pos()
 
-            # 推送到事件
-            self.put_all_strategy_pos_event(all_strategy_pos)
+                # 每5分钟检查一次
+                if dt.minute % 5 == 0:
+                    # 比对仓位，使用上述获取得持仓信息，不用重复获取
+                    self.compare_pos(strategy_pos_list=copy(all_strategy_pos))
+
+                # 推送到事件
+                self.put_all_strategy_pos_event(all_strategy_pos)
 
     def process_tick_event(self, event: Event):
         """处理tick到达事件"""
@@ -338,6 +353,21 @@ class CtaEngine(BaseEngine):
 
         # Update GUI
         self.put_strategy_event(strategy)
+
+        # 如果配置文件 cta_stock_config.json中，有trade_2_wx的设置项，则发送微信通知
+        if self.engine_config.get('trade_2_wx', False):
+            accountid = self.engine_config.get('accountid', 'XXX')
+            d = {
+                'account': accountid,
+                'strategy': strategy_name,
+                'symbol': trade.symbol,
+                'action': f'{trade.direction.value} {trade.offset.value}',
+                'price': str(trade.price),
+                'volume': trade.volume,
+                'remark': f'{accountid}:{strategy_name}',
+                'timestamp': trade.time
+            }
+            send_wx_msg(content=d, target=accountid, msg_type='TRADE')
 
     def process_position_event(self, event: Event):
         """"""
@@ -621,7 +651,7 @@ class CtaEngine(BaseEngine):
         order = self.main_engine.get_order(vt_orderid)
         if not order:
             self.write_log(msg=f"撤单失败，找不到委托{vt_orderid}",
-                           strategy_Name=strategy.strategy_name,
+                           strategy_name=strategy.strategy_name,
                            level=logging.ERROR)
             return False
 
@@ -782,10 +812,21 @@ class CtaEngine(BaseEngine):
         """查询价格最小跳动"""
         contract = self.main_engine.get_contract(vt_symbol)
         if contract is None:
-            self.write_error(f'查询不到{vt_symbol}合约信息')
+            self.write_error(f'查询不到{vt_symbol}合约信息，缺省使用0.1作为价格跳动')
             return 0.1
 
         return contract.pricetick
+
+    @lru_cache()
+    def get_volume_tick(self, vt_symbol: str):
+        """查询合约的最小成交数量"""
+        contract = self.main_engine.get_contract(vt_symbol)
+        if contract is None:
+            self.write_error(f'查询不到{vt_symbol}合约信息,缺省使用1作为最小成交数量')
+            return 1
+
+        return contract.min_volume
+
 
     def get_tick(self, vt_symbol: str):
         """获取合约得最新tick"""
@@ -802,6 +843,9 @@ class CtaEngine(BaseEngine):
             return tick.last_price
 
         return None
+
+    def get_contract(self, vt_symbol):
+        return self.main_engine.get_contract(vt_symbol)
 
     def get_account(self, vt_accountid: str = ""):
         """ 查询账号的资金"""
@@ -848,6 +892,44 @@ class CtaEngine(BaseEngine):
         log_path = os.path.abspath(os.path.join(TRADER_DIR, 'log'))
         return log_path
 
+    def load_bar(
+            self,
+            vt_symbol: str,
+            days: int,
+            interval: Interval,
+            callback: Callable[[BarData], None],
+            interval_num: int = 1
+    ):
+        """获取历史记录"""
+        symbol, exchange = extract_vt_symbol(vt_symbol)
+        end = datetime.now()
+        start = end - timedelta(days)
+        bars = []
+
+        # Query bars from gateway if available
+        contract = self.main_engine.get_contract(vt_symbol)
+
+        if contract and contract.history_data:
+            req = HistoryRequest(
+                symbol=symbol,
+                exchange=exchange,
+                interval=interval,
+                interval_num=interval_num,
+                start=start,
+                end=end
+            )
+            bars = self.main_engine.query_history(req, contract.gateway_name)
+
+            if bars is None:
+                self.write_error(f'获取不到历史K线:{req.__dict__}')
+                return
+
+        for bar in bars:
+            if bar.trading_day:
+                bar.trading_day = bar.datetime.strftime('%Y-%m-%d')
+
+            callback(bar)
+
     def call_strategy_func(
             self, strategy: CtaTemplate, func: Callable, params: Any = None
     ):
@@ -867,6 +949,7 @@ class CtaEngine(BaseEngine):
             self.write_log(msg=msg,
                            strategy_name=strategy.strategy_name,
                            level=logging.CRITICAL)
+            self.send_wechat(msg)
 
     def add_strategy(
             self, class_name: str,
@@ -1077,21 +1160,42 @@ class CtaEngine(BaseEngine):
         if len(setting) == 0:
             strategies_setting = load_json(self.setting_filename)
             old_strategy_config = strategies_setting.get(strategy_name, {})
+            self.write_log(f'使用配置文件的配置:{old_strategy_config}')
         else:
             old_strategy_config = copy(self.strategy_setting[strategy_name])
+            self.write_log(f'使用已经运行的配置:{old_strategy_config}')
 
         class_name = old_strategy_config.get('class_name')
+        self.write_log(f'使用策略类名:{class_name}')
+
+        # 没有配置vt_symbol时，使用配置文件/旧配置中的vt_symbol
         if len(vt_symbol) == 0:
             vt_symbol = old_strategy_config.get('vt_symbol')
+            self.write_log(f'使用配置文件/已运行配置的vt_symbol:{vt_symbol}')
+
+        # 没有新配置时，使用配置文件/旧配置中的setting
         if len(setting) == 0:
             setting = old_strategy_config.get('setting')
+            self.write_log(f'没有新策略参数，使用配置文件/旧配置中的setting:{setting}')
 
         module_name = self.class_module_map[class_name]
         # 重新load class module
-        if not self.load_strategy_class_from_module(module_name):
-            err_msg = f'不能加载模块:{module_name}'
-            self.write_error(err_msg)
-            return False, err_msg
+        #if not self.load_strategy_class_from_module(module_name):
+        #    err_msg = f'不能加载模块:{module_name}'
+        #    self.write_error(err_msg)
+        #    return False, err_msg
+        if module_name:
+            new_class_name = module_name + '.' + class_name
+            self.write_log(u'转换策略为全路径:{}'.format(new_class_name))
+
+            strategy_class = import_module_by_str(new_class_name)
+            if strategy_class is None:
+                err_msg = u'加载策略模块失败:{}'.format(new_class_name)
+                self.write_error(err_msg)
+                return False, err_msg
+
+            self.write_log(f'重新加载模块成功，使用新模块:{new_class_name}')
+            self.classes[class_name] = strategy_class
 
         # 停止当前策略实例的运行，撤单
         self.stop_strategy(strategy_name)
@@ -1147,6 +1251,25 @@ class CtaEngine(BaseEngine):
             self.write_error(u'保存策略{}数据异常:'.format(strategy_name, str(ex)))
             self.write_error(traceback.format_exc())
 
+    def get_strategy_snapshot(self, strategy_name):
+        """实时获取策略的K线切片（比较耗性能）"""
+        strategy = self.strategies.get(strategy_name, None)
+        if strategy is None:
+            return None
+
+        try:
+            # 5.保存策略切片
+            snapshot = strategy.get_klines_snapshot()
+            if not snapshot:
+                self.write_log(f'{strategy_name}返回得K线切片数据为空')
+                return None
+            return snapshot
+
+        except Exception as ex:
+            self.write_error(u'获取策略{}切片数据异常:'.format(strategy_name, str(ex)))
+            self.write_error(traceback.format_exc())
+            return None
+
     def save_strategy_snapshot(self, select_name: str = 'ALL'):
         """
         保存策略K线切片数据
@@ -1197,6 +1320,15 @@ class CtaEngine(BaseEngine):
                 pickle.dump(snapshot, f)
                 self.write_log(u'切片保存成功:{}'.format(str(snapshot_file)))
 
+            # 通过事件方式，传导到account_recorder
+            snapshot.update({
+                'account_id': self.engine_config.get('accountid', '-'),
+                'strategy_group': self.engine_config.get('strategy_group', self.engine_name),
+                'guid': str(uuid1())
+            })
+            event = Event(EVENT_STRATEGY_SNAPSHOT, snapshot)
+            self.event_engine.put(event)
+
         except Exception as ex:
             self.write_error(u'获取策略{}切片数据异常:'.format(strategy_name, str(ex)))
             self.write_error(traceback.format_exc())
@@ -1224,6 +1356,9 @@ class CtaEngine(BaseEngine):
                     strategy_module_name = ".".join(
                         [module_name, filename.replace(".py", "")])
                 elif filename.endswith(".pyd"):
+                    strategy_module_name = ".".join(
+                        [module_name, filename.split(".")[0]])
+                elif filename.endswith(".so"):
                     strategy_module_name = ".".join(
                         [module_name, filename.split(".")[0]])
                 else:
@@ -1295,7 +1430,7 @@ class CtaEngine(BaseEngine):
         # 兼容处理，如果strategy是None，通过name获取
         if strategy is None:
             if name not in self.strategies:
-                self.write_log(u'getStategyPos 策略实例不存在：' + name)
+                self.write_log(u'get_strategy_pos 策略实例不存在：' + name)
                 return []
             # 获取策略实例
             strategy = self.strategies[name]
@@ -1451,7 +1586,33 @@ class CtaEngine(BaseEngine):
         d.update(strategy.get_parameters())
         return d
 
-    def compare_pos(self):
+    def get_strategy_value(self, strategy_name: str, parameter: str):
+        """获取策略的某个参数值"""
+        strategy = self.strategies.get(strategy_name)
+        if not strategy:
+            return None
+
+        value = getattr(strategy, parameter, None)
+        return value
+
+    def get_none_strategy_pos_list(self):
+        """获取非策略持有的仓位"""
+        # 格式 [  'strategy_name':'account', 'pos': [{'vt_symbol': '', 'direction': 'xxx', 'volume':xxx }] } ]
+        none_strategy_pos_file = os.path.abspath(os.path.join(os.getcwd(), 'data', 'none_strategy_pos.json'))
+        if not os.path.exists(none_strategy_pos_file):
+            return []
+        try:
+            with open(none_strategy_pos_file, encoding='utf8') as f:
+                pos_list = json.load(f)
+                if isinstance(pos_list, list):
+                    return pos_list
+
+            return []
+        except Exception as ex:
+            self.write_error(u'未能读取或解释{}'.format(none_strategy_pos_file))
+            return []
+
+    def compare_pos(self, strategy_pos_list=[], auto_balance=False):
         """
         对比账号&策略的持仓,不同的话则发出微信提醒
         :return:
@@ -1463,8 +1624,13 @@ class CtaEngine(BaseEngine):
         self.write_log(u'开始对比账号&策略的持仓')
 
         # 获取当前策略得持仓
-        strategy_pos_list = self.get_all_strategy_pos()
+        if len(strategy_pos_list) == 0:
+            strategy_pos_list = self.get_all_strategy_pos()
         self.write_log(u'策略持仓清单:{}'.format(strategy_pos_list))
+
+        none_strategy_pos = self.get_none_strategy_pos_list()
+        if len(none_strategy_pos) > 0:
+            strategy_pos_list.extend(none_strategy_pos)
 
         # 需要进行对比得合约集合（来自策略持仓/账号持仓）
         vt_symbols = set()
@@ -1480,6 +1646,10 @@ class CtaEngine(BaseEngine):
             vt_symbols.add(vt_symbol)
             holding = self.offset_converter.holdings.get(holding_key, None)
             if holding is None:
+                continue
+            if holding.exchange == Exchange.SPD:
+                continue
+            if '&' in holding.vt_symbol and (holding.vt_symbol.startswith('SP') or holding.vt_symbol.startswith('STG')):
                 continue
 
             compare_pos[vt_symbol] = OrderedDict(
@@ -1530,15 +1700,17 @@ class CtaEngine(BaseEngine):
         compare_info = ''
         for vt_symbol in sorted(vt_symbols):
             # 发送不一致得结果
-            symbol_pos = compare_pos.pop(vt_symbol)
+            symbol_pos = compare_pos.pop(vt_symbol, None)
+            if symbol_pos is None:
+                continue
             d_long = {
-                'account_id': self.engine_config.get('account_id', '-'),
+                'account_id': self.engine_config.get('accountid', '-'),
                 'vt_symbol': vt_symbol,
                 'direction': Direction.LONG.value,
                 'strategy_list': symbol_pos.get('多单策略', [])}
 
             d_short = {
-                'account_id': self.engine_config.get('account_id', '-'),
+                'account_id': self.engine_config.get('accountid', '-'),
                 'vt_symbol': vt_symbol,
                 'direction': Direction.SHORT.value,
                 'strategy_list': symbol_pos.get('空单策略', [])}
@@ -1551,8 +1723,9 @@ class CtaEngine(BaseEngine):
                 compare_info += msg
             else:
                 pos_compare_result += '\n{}: '.format(vt_symbol)
-                # 多单不一致
-                if round(symbol_pos['策略多单'], 7) != round(symbol_pos['账号多单'], 7):
+                # 判断是多单不一致？
+                diff_long_volume = round(symbol_pos['账号多单'], 7) - round(symbol_pos['策略多单'], 7)
+                if diff_long_volume != 0:
                     msg = '{}多单[账号({}), 策略{},共({})], ' \
                         .format(vt_symbol,
                                 symbol_pos['账号多单'],
@@ -1562,8 +1735,13 @@ class CtaEngine(BaseEngine):
                     pos_compare_result += msg
                     self.write_error(u'{}不一致:{}'.format(vt_symbol, msg))
                     compare_info += u'{}不一致:{}\n'.format(vt_symbol, msg)
-                # 空单不一致
-                if round(symbol_pos['策略空单'], 7) != round(symbol_pos['账号空单'], 7):
+                    if auto_balance:
+                        self.balance_pos(vt_symbol, Direction.LONG, diff_long_volume)
+
+                # 判断是空单不一致:
+                diff_short_volume = round(symbol_pos['账号空单'], 7) - round(symbol_pos['策略空单'], 7)
+
+                if diff_short_volume != 0:
                     msg = '{}空单[账号({}), 策略{},共({})], ' \
                         .format(vt_symbol,
                                 symbol_pos['账号空单'],
@@ -1572,16 +1750,18 @@ class CtaEngine(BaseEngine):
                     pos_compare_result += msg
                     self.write_error(u'{}不一致:{}'.format(vt_symbol, msg))
                     compare_info += u'{}不一致:{}\n'.format(vt_symbol, msg)
+                    if auto_balance:
+                        self.balance_pos(vt_symbol, Direction.SHORT, diff_short_volume)
 
         # 不匹配，输入到stdErr通道
         if pos_compare_result != '':
             msg = u'账户{}持仓不匹配: {}' \
-                .format(self.engine_config.get('account_id', '-'),
+                .format(self.engine_config.get('accountid', '-'),
                         pos_compare_result)
             try:
                 from vnpy.trader.util_wechat import send_wx_msg
                 send_wx_msg(content=msg)
-            except Exception as ex: # noqa
+            except Exception as ex:  # noqa
                 pass
             ret_msg = u'持仓不匹配: {}' \
                 .format(pos_compare_result)
@@ -1590,6 +1770,52 @@ class CtaEngine(BaseEngine):
         else:
             self.write_log(u'账户持仓与策略一致')
             return True, compare_info
+
+    def balance_pos(self, vt_symbol, direction, volume):
+        """
+        平衡仓位
+        :param vt_symbol: 需要平衡得合约
+        :param direction: 合约原始方向
+        :param volume: 合约需要调整得数量（正数，需要平仓， 负数，需要开仓）
+        :return:
+        """
+        tick = self.get_tick(vt_symbol)
+        if tick is None:
+            gateway_names = self.main_engine.get_all_gateway_names()
+            gateway_name = gateway_names[0] if len(gateway_names) > 0 else ""
+            symbol, exchange = extract_vt_symbol(vt_symbol)
+            self.main_engine.subscribe(req=SubscribeRequest(symbol=symbol, exchange=exchange),
+                                       gateway_name=gateway_name)
+        if volume > 0 and tick:
+            contract = self.main_engine.get_contract(vt_symbol)
+            req = OrderRequest(
+                symbol=contract.symbol,
+                exchange=contract.exchange,
+                direction=Direction.SHORT if direction == Direction.LONG else Direction.LONG,
+                offset=Offset.CLOSE,
+                type=OrderType.FAK,
+                price=tick.ask_price_1 if direction == Direction.SHORT else tick.bid_price_1,
+                volume=round(volume, 7)
+            )
+            reqs = self.offset_converter.convert_order_request(req=req, lock=False)
+            self.write_log(f'平衡仓位，减少 {vt_symbol}，方向:{direction}，数量:{req.volume} ')
+            for req in reqs:
+                self.main_engine.send_order(req, contract.gateway_name)
+        elif volume < 0 and tick:
+            contract = self.main_engine.get_contract(vt_symbol)
+            req = OrderRequest(
+                symbol=contract.symbol,
+                exchange=contract.exchange,
+                direction=direction,
+                offset=Offset.OPEN,
+                type=OrderType.FAK,
+                price=tick.ask_price_1 if direction == Direction.LONG else tick.bid_price_1,
+                volume=round(abs(volume), 7)
+            )
+            reqs = self.offset_converter.convert_order_request(req=req, lock=False)
+            self.write_log(f'平衡仓位， 增加{vt_symbol}， 方向:{direction}, 数量: {req.volume}')
+            for req in reqs:
+                self.main_engine.send_order(req, contract.gateway_name)
 
     def init_all_strategies(self):
         """
@@ -1714,9 +1940,13 @@ class CtaEngine(BaseEngine):
         if level in [logging.CRITICAL, logging.ERROR, logging.WARNING]:
             print(f"{strategy_name}: {msg}" if strategy_name else msg, file=sys.stderr)
 
-    def write_error(self, msg: str, strategy_name: str = ''):
+        if level in [logging.CRITICAL, logging.WARN, logging.WARNING]:
+            send_wx_msg(content=f"{strategy_name}: {msg}" if strategy_name else msg, target=self.engine_config.get('accountid', 'XXX'))
+
+    def write_error(self, msg: str, strategy_name: str = '', level: int = logging.ERROR):
         """写入错误日志"""
-        self.write_log(msg=msg, strategy_name=strategy_name, level=logging.ERROR)
+        self.write_log(msg=msg, strategy_name=strategy_name, level=level)
+
 
     def send_email(self, msg: str, strategy: CtaTemplate = None):
         """

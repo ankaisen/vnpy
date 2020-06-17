@@ -1,10 +1,11 @@
 # flake8: noqa
 """
-下载通达信指数合约1分钟bar => vnpy项目目录/bar_data/
+下载通达信指数合约1分钟bar => vnpy项目目录/bar_data/tdx/
 """
 import os
 import sys
 import json
+import csv
 from collections import OrderedDict
 import pandas as pd
 
@@ -15,6 +16,7 @@ if vnpy_root not in sys.path:
 os.environ["VNPY_TESTING"] = "1"
 
 from vnpy.data.tdx.tdx_future_data import *
+from vnpy.trader.utility import get_csv_last_dt
 
 # 保存的1分钟指数 bar目录
 bar_data_folder = os.path.abspath(os.path.join(vnpy_root, 'bar_data'))
@@ -33,19 +35,19 @@ for underlying_symbol in api_01.future_contracts.keys():
     index_symbol = underlying_symbol + '99'
     print(f'开始更新:{index_symbol}')
     # csv数据文件名
-    bar_file_path = os.path.abspath(os.path.join(bar_data_folder, f'{underlying_symbol}99_{start_date}_1m.csv'))
+    bar_file_path = os.path.abspath(os.path.join(bar_data_folder, 'tdx', f'{underlying_symbol}99_{start_date}_1m.csv'))
 
     # 如果文件存在，
     if os.path.exists(bar_file_path):
 
-        df_old = pd.read_csv(bar_file_path, index_col=0)
-        df_old = df_old.rename(lambda x: pd.to_datetime(x, format="%Y-%m-%d %H:%M:%S"))
+        #df_old = pd.read_csv(bar_file_path, index_col=0)
+        #df_old = df_old.rename(lambda x: pd.to_datetime(x, format="%Y-%m-%d %H:%M:%S"))
         # 取最后一条时间
-        last_dt = df_old.index[-1]
+        last_dt = get_csv_last_dt(bar_file_path)
         start_dt = last_dt - timedelta(days=1)
         print(f'文件{bar_file_path}存在，最后时间:{start_date}')
     else:
-        df_old = None
+        last_dt = None
         start_dt = datetime.strptime(start_date, '%Y%m%d')
         print(f'文件{bar_file_path}不存在，开始时间:{start_date}')
 
@@ -57,25 +59,40 @@ for underlying_symbol in api_01.future_contracts.keys():
     # [dict] => dataframe
     if not result or len(bars) == 0:
         continue
-    df_extern = pd.DataFrame(bars)
-    df_extern.set_index('datetime', inplace=True)
 
-    if df_old is not None:
-        # 扩展数据
-        print('扩展数据')
-        data_df = pd.concat([df_old, df_extern], axis=0)
-    else:
-        data_df = df_extern
+    if last_dt is None:
+        data_df = pd.DataFrame(bars)
+        data_df.set_index('datetime', inplace=True)
+        data_df = data_df.sort_index()
+        # print(data_df.head())
+        print(data_df.tail())
+        data_df.to_csv(bar_file_path, index=True)
+        print(f'首次更新{index_symbol} 数据 => 文件{bar_file_path}')
+        continue
 
-    # 数据按时间戳去重
-    print('按时间戳去重')
-    data_df = data_df[~data_df.index.duplicated(keep='first')]
-    # 排序
-    data_df = data_df.sort_index()
-    # print(data_df.head())
-    print(data_df.tail())
-    data_df.to_csv(bar_file_path, index=True)
-    print(f'更新{index_symbol}数据 => 文件{bar_file_path}')
+
+    # 获取标题
+    headers = []
+    with open(bar_file_path, "r", encoding='utf8') as f:
+        reader = csv.reader(f)
+        for header in reader:
+            headers = header
+            break
+
+    bar_count = 0
+    # 写入所有大于最后bar时间的数据
+    with open(bar_file_path, 'a', encoding='utf8', newline='\n') as csvWriteFile:
+
+        writer = csv.DictWriter(f=csvWriteFile, fieldnames=headers, dialect='excel',
+                                extrasaction='ignore')
+        for bar in bars:
+            if bar['datetime'] <= last_dt:
+                continue
+            bar_count += 1
+            writer.writerow(bar)
+
+        print(f'更新{index_symbol} 数据 => 文件{bar_file_path}, 最后记录:{bars[-1]}')
+
 
 print('更新完毕')
 os._exit(0)
